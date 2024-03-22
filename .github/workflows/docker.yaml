@@ -10,7 +10,7 @@ defaults:
     shell: bash
 
 env:
-  DOCKER_REGISTRY: 976946552983.dkr.ecr.ap-east-1.amazonaws.com/
+  DOCKER_REGISTRY: 976946552983.dkr.ecr.ap-east-1.amazonaws.com
   TAG: ${{ github.ref_name }}
 jobs:
   release:
