@@ -1,0 +1,96 @@
+name: Release Docker
+
+on:
+  push:
+    branches:
+      - release
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DOCKER_REGISTRY: 976946552983.dkr.ecr.ap-east-1.amazonaws.com/
+  TAG: :${{ github.ref_name }}
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+        # - aarch64-apple-darwin
+        # - x86_64-apple-darwin
+        # - x86_64-pc-windows-msvc
+        - x86_64-unknown-linux-gnu
+        - aarch64-unknown-linux-gnu
+        include:
+        # - target: aarch64-apple-darwin
+        #   os: macos-latest
+        #   target_rustflags: ''
+        # - target: x86_64-apple-darwin
+        #   os: macos-latest
+        #   target_rustflags: ''
+        # - target: x86_64-pc-windows-msvc
+        #   os: windows-latest
+        #   target_rustflags: ''
+        - target: x86_64-unknown-linux-gnu
+          os: ubuntu-latest
+          target_rustflags: ''
+          arch: amd64
+        - target: aarch64-unknown-linux-gnu
+          os: ubuntu-latest
+          target_rustflags: ''
+          arch: arm64
+
+    runs-on: ${{matrix.os}}
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Install Rust Toolchain Components
+      uses: actions-rs/toolchain@v1
+      with:
+        override: true
+        target: ${{ matrix.target }}
+        toolchain: stable
+
+    - name: Install Linux Dependencies
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install musl-tools libssl-dev pkg-config
+
+    - name: Release Type
+      id: release-type
+      run: |
+        # if [[ ${{ github.ref }} =~ ^refs/tags/[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+        #     echo ::set-output name=value::release
+        # else
+        #     echo ::set-output name=value::prerelease
+        # fi
+        echo ::set-output name=value::release
+
+    - name: Build ord
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Docker Build
+      run: |
+        docker build -t ord --build-args TARGETARCH=${{ matrix.arch }} .
+        docker tag ord ${{ env.DOCKER_REGISTRY }}/ord:${{ env.TAG }}-${{ matrix.arch }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4 # More information on this action can be found below in the 'AWS Credentials' section
+      with:
+        aws-access-key-id:  ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        mask-password: 'true'
+
+    - name: Push to Amazon ECR
+      run: |
+        docker push ${{ env.DOCKER_REGISTRY }}/ord:${{ env.TAG }}-${{ matrix.arch }}
