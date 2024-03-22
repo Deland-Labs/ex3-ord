@@ -13,7 +13,7 @@ FROM builder_${TARGETARCH} AS build
 
 # Copy the ord executable into the container
 EXPOSE 8080
-COPY ./target/release/ord /usr/local/bin/ord
+COPY ./ord /usr/local/bin/ord
 
 # Set executable permissions for ord
 RUN chmod +x /usr/local/bin/ord

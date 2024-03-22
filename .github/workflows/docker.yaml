@@ -11,7 +11,7 @@ defaults:
 
 env:
   DOCKER_REGISTRY: 976946552983.dkr.ecr.ap-east-1.amazonaws.com/
-  TAG: :${{ github.ref_name }}
+  TAG: ${{ github.ref_name }}
 jobs:
   release:
     strategy:
@@ -22,7 +22,7 @@ jobs:
         # - x86_64-apple-darwin
         # - x86_64-pc-windows-msvc
         - x86_64-unknown-linux-gnu
-        - aarch64-unknown-linux-gnu
+        # - aarch64-unknown-linux-gnu
         include:
         # - target: aarch64-apple-darwin
         #   os: macos-latest
@@ -37,10 +37,10 @@ jobs:
           os: ubuntu-latest
           target_rustflags: ''
           arch: amd64
-        - target: aarch64-unknown-linux-gnu
-          os: ubuntu-latest
-          target_rustflags: ''
-          arch: arm64
+        # - target: aarch64-unknown-linux-gnu
+        #   os: ubuntu-latest
+        #   target_rustflags: ''
+        #   arch: arm64
 
     runs-on: ${{matrix.os}}
 
@@ -59,6 +59,11 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install musl-tools libssl-dev pkg-config
+    - name: Install linux arm64 Dependencies
+      if: ${{ matrix.target == 'aarch64-unknown-linux-gnu' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install gcc-aarch64-linux-gnu
 
     - name: Release Type
       id: release-type
@@ -71,11 +76,13 @@ jobs:
         echo ::set-output name=value::release
 
     - name: Build ord
-      run: cargo build --release --target ${{ matrix.target }}
+      run: |
+        cargo build --release --target ${{ matrix.target }}
+        cp target/${{ matrix.target }}/release/ord .
 
     - name: Docker Build
       run: |
-        docker build -t ord --build-args TARGETARCH=${{ matrix.arch }} .
+        docker build --build-arg TARGETARCH=${{ matrix.arch }} -t ord  .
         docker tag ord ${{ env.DOCKER_REGISTRY }}/ord:${{ env.TAG }}-${{ matrix.arch }}
 
     - name: Configure AWS credentials
