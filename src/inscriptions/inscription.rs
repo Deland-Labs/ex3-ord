@@ -109,6 +109,35 @@ impl Inscription {
     })
   }
 
+  pub(crate) fn from_content(
+    chain: Chain,
+    content_type: String,
+    body: String,
+    parent: Option<InscriptionId>,
+    pointer: Option<u64>,
+    metaprotocol: Option<String>,
+    metadata: Option<Vec<u8>>,
+  ) -> Result<Self, Error> {
+    let body = body.into_bytes();
+    if let Some(limit) = chain.inscription_content_size_limit() {
+      let len = body.len();
+      if len > limit {
+        bail!("content size of {len} bytes exceeds {limit} byte limit for {chain} inscriptions");
+      }
+    }
+
+    Ok(Self {
+      body: Some(body),
+      content_type: Some(content_type.into_bytes()),
+      content_encoding: None,
+      metadata,
+      metaprotocol: metaprotocol.map(|m| m.into_bytes()),
+      parent: parent.map(|id| id.value()),
+      pointer: pointer.map(Self::pointer_value),
+      ..Default::default()
+    })
+  }
+
   pub(crate) fn pointer_value(pointer: u64) -> Vec<u8> {
     let mut bytes = pointer.to_le_bytes().to_vec();
 

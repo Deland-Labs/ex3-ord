@@ -1,3 +1,4 @@
+use axum::routing::post;
 use {
   self::{
     accept_encoding::AcceptEncoding,
@@ -337,6 +338,10 @@ impl Server {
         .route(
           "/brc20/block/:block_hash/events",
           get(brc20::brc20_block_events),
+        )
+        .route(
+          "/brc20/inscribe_transferable",
+          post(brc20::inscribe_brc20_transferable),
         )
         .route(
           "/wallet/:address/available_unspent_outputs",
