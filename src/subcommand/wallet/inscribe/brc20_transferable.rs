@@ -49,7 +49,7 @@ impl Brc20Transferable {
         commit_tx_change,
       )?;
 
-    let network = index.get_chain_network();
+    let network = index.get_chain().network();
     if !self.no_backup {
       backup_recovery_key(index.as_ref(), recovery_key_pair, network)?;
     }

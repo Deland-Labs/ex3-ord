@@ -46,7 +46,7 @@ pub fn index_bitmap(
         {
           let key = district.to_collection_key();
           context.set_inscription_by_collection_key(&key, &inscription_id)?;
-          context.set_inscription_attributes(&inscription_id, &[CollectionKind::BitMap])?;
+          context.add_inscription_attributes(&inscription_id, CollectionKind::BitMap)?;
 
           count += 1;
         }
@@ -64,7 +64,7 @@ fn index_district(
 ) -> Result<Option<(InscriptionId, District)>> {
   if let Some(content) = inscription.body() {
     if let Ok(district) = District::parse(content) {
-      if district.number > context.chain.blockheight {
+      if district.number > context.chain_conf.blockheight {
         return Ok(None);
       }
       let collection_key = district.to_collection_key();

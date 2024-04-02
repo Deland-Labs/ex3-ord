@@ -1,10 +1,7 @@
 pub use self::operation::{Action, InscriptionOp};
-use bitcoin::Network;
 
-use crate::okx::datastore::ScriptKey;
-use crate::SatPoint;
 use {
-  crate::{InscriptionId, Result},
+  crate::{okx::datastore::ScriptKey, Chain, InscriptionId, Result, SatPoint},
   bitcoin::Txid,
   collections::CollectionKind,
   std::fmt::{Debug, Display},
@@ -25,10 +22,13 @@ pub trait OrdReader {
   fn get_script_key_on_satpoint(
     &mut self,
     satpoint: &SatPoint,
-    network: Network,
+    chain: Chain,
   ) -> Result<ScriptKey, Self::Error>;
 
-  fn get_transaction_operations(&self, txid: &Txid) -> Result<Vec<InscriptionOp>, Self::Error>;
+  fn get_transaction_operations(
+    &self,
+    txid: &Txid,
+  ) -> Result<Option<Vec<InscriptionOp>>, Self::Error>;
 
   fn get_collections_of_inscription(
     &self,
@@ -54,9 +54,9 @@ pub trait OrdReaderWriter: OrdReader {
     inscription_id: &InscriptionId,
   ) -> Result<(), Self::Error>;
 
-  fn set_inscription_attributes(
+  fn add_inscription_attributes(
     &mut self,
     inscription_id: &InscriptionId,
-    kind: &[CollectionKind],
+    kind: CollectionKind,
   ) -> Result<(), Self::Error>;
 }

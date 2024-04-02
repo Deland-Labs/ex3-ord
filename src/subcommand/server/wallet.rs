@@ -3,8 +3,8 @@ use {super::*, axum::Json, utoipa::ToSchema};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[schema(as = wallet::AvailableUnspentOutputs)]
-pub struct AvailableUnspentOutputs {
+#[schema(as = wallet::ApiAvailableUnspentOutputs)]
+pub struct ApiAvailableUnspentOutputs {
   #[schema(value_type =  BTreeMap<OutPoint, u64>)]
   pub utxos: BTreeMap<OutPoint, u64>,
 }
@@ -29,11 +29,11 @@ pub struct AvailableUnspentOutputs {
 pub(crate) async fn available_unspent_outputs(
   Extension(index): Extension<Arc<Index>>,
   Path(address): Path<String>,
-) -> ApiResult<AvailableUnspentOutputs> {
+) -> ApiResult<ApiAvailableUnspentOutputs> {
   log::debug!("rpc: get available_unspent_outputs: {}", address);
 
   let address = Address::from_str(&address)
-    .and_then(|address| address.require_network(index.get_chain_network()))
+    .and_then(|address| address.require_network(index.get_chain().network()))
     .map_err(ApiError::bad_request)?;
   let address_ref: &[&Address<NetworkChecked>] = &[&address];
   let address_option: Option<&[&Address<NetworkChecked>]> = Some(address_ref);
@@ -69,7 +69,7 @@ pub(crate) async fn available_unspent_outputs(
     .map(|(outpoint, amount)| (*outpoint, amount.to_sat()))
     .collect();
 
-  Ok(Json(ApiResponse::ok(AvailableUnspentOutputs {
+  Ok(Json(ApiResponse::ok(ApiAvailableUnspentOutputs {
     utxos: available_utxos,
   })))
 }

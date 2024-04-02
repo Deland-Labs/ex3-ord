@@ -304,7 +304,7 @@ pub(crate) struct InscribeBrc20Transferable {
 impl InscribeBrc20Transferable {
   pub(crate) fn execute(self, index: Arc<Index>) -> SubcommandResult {
     index.update()?;
-    let network = index.get_chain_network();
+    let network = index.get_chain().network();
     let destination =
       Address::from_str(&self.from_wallet).and_then(|address| address.require_network(network))?;
 

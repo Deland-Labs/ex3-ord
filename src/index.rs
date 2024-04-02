@@ -1,6 +1,7 @@
 use crate::okx::datastore::brc20::redb::table::{
   get_balance, get_balances, get_token_info, get_tokens_info, get_transaction_receipts,
-  get_transferable, get_transferable_by_tick,
+  get_transferable_assets_by_account, get_transferable_assets_by_account_ticker,
+  get_transferable_assets_by_outpoint,
 };
 use crate::okx::datastore::ord::redb::table::{
   get_collection_inscription_id, get_collections_of_inscription, get_transaction_operations,
@@ -9,8 +10,9 @@ use crate::okx::datastore::ord::redb::table::{
 use crate::okx::datastore::{brc20, ScriptKey};
 use bitcoin::address::NetworkChecked;
 use bitcoin::PrivateKey;
-use bitcoincore_rpc::bitcoincore_rpc_json::{GetBlockResult, ImportDescriptors, ImportMultiResult};
+use bitcoincore_rpc::bitcoincore_rpc_json::{ImportDescriptors, ImportMultiResult};
 use bitcoincore_rpc::json::{GetDescriptorInfoResult, ListUnspentResultEntry};
+
 use {
   self::{
     entry::{Entry, HeaderValue, RuneEntryValue, RuneIdValue, SatPointValue, SatRange},
@@ -50,8 +52,10 @@ pub(super) use self::updater::BlockData;
 pub(crate) mod entry;
 mod fetcher;
 mod reorg;
-mod rtx;
+pub(crate) mod rtx;
 pub(crate) mod updater;
+
+mod extend;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -96,13 +100,13 @@ define_table! { WRITE_TRANSACTION_STARTING_BLOCK_COUNT_TO_TIMESTAMP, u32, u128 }
 // new
 define_table! { ORD_TX_TO_OPERATIONS, &TxidValue, &[u8] }
 define_table! { COLLECTIONS_KEY_TO_INSCRIPTION_ID, &str, InscriptionIdValue }
-define_table! { COLLECTIONS_INSCRIPTION_ID_TO_KINDS, InscriptionIdValue, &[u8] }
+define_multimap_table! { COLLECTIONS_INSCRIPTION_ID_TO_KINDS, InscriptionIdValue, &[u8] }
 
 define_table! { BRC20_BALANCES, &str, &[u8] }
 define_table! { BRC20_TOKEN, &str, &[u8] }
 define_table! { BRC20_EVENTS, &TxidValue, &[u8] }
-define_table! { BRC20_TRANSFERABLELOG, &str, &[u8] }
-define_table! { BRC20_INSCRIBE_TRANSFER, InscriptionIdValue, &[u8] }
+define_table! { BRC20_SATPOINT_TO_TRANSFERABLE_ASSETS, &SatPointValue, &[u8] }
+define_multimap_table! { BRC20_ADDRESS_TICKER_TO_TRANSFERABLE_ASSETS, &str, &SatPointValue }
 
 #[derive(Debug, PartialEq)]
 pub enum List {
@@ -271,26 +275,28 @@ impl Index {
     let once = Once::new();
     let progress_bar = Mutex::new(None);
 
+    let repair_callback = move |progress: &mut RepairSession| {
+      once.call_once(|| println!("Index file `{}` needs recovery. This can take a long time, especially for the --index-sats index.", index_path.display()));
+
+      if !(cfg!(test) || log_enabled!(log::Level::Info) || integration_test()) {
+        let mut guard = progress_bar.lock().unwrap();
+
+        let progress_bar = guard.get_or_insert_with(|| {
+          let progress_bar = ProgressBar::new(100);
+          progress_bar.set_style(
+            ProgressStyle::with_template("[repairing database] {wide_bar} {pos}/{len}").unwrap(),
+          );
+          progress_bar
+        });
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        progress_bar.set_position((progress.progress() * 100.0) as u64);
+      }
+    };
+
     let database = match Database::builder()
       .set_cache_size(db_cache_size)
-      .set_repair_callback(move |progress: &mut RepairSession| {
-        once.call_once(|| println!("Index file `{}` needs recovery. This can take a long time, especially for the --index-sats index.", index_path.display()));
-
-        if !(cfg!(test) || log_enabled!(log::Level::Info) || integration_test()) {
-          let mut guard = progress_bar.lock().unwrap();
-
-          let progress_bar = guard.get_or_insert_with(|| {
-            let progress_bar = ProgressBar::new(100);
-            progress_bar.set_style(
-              ProgressStyle::with_template("[repairing database] {wide_bar} {pos}/{len}").unwrap(),
-            );
-            progress_bar
-          });
-
-          #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-          progress_bar.set_position((progress.progress() * 100.0) as u64);
-        }
-      })
+      .set_repair_callback(repair_callback)
       .open(&path)
     {
       Ok(database) => {
@@ -317,7 +323,6 @@ impl Index {
             cmp::Ordering::Equal => {
             }
           }
-
 
           index_runes = Self::is_statistic_set(&statistics, Statistic::IndexRunes)?;
           index_sats = Self::is_statistic_set(&statistics, Statistic::IndexSats)?;
@@ -359,14 +364,14 @@ impl Index {
         // new ord tables
         tx.open_table(ORD_TX_TO_OPERATIONS)?;
         tx.open_table(COLLECTIONS_KEY_TO_INSCRIPTION_ID)?;
-        tx.open_table(COLLECTIONS_INSCRIPTION_ID_TO_KINDS)?;
+        tx.open_multimap_table(COLLECTIONS_INSCRIPTION_ID_TO_KINDS)?;
 
         // brc20 tables
+        tx.open_multimap_table(BRC20_ADDRESS_TICKER_TO_TRANSFERABLE_ASSETS)?;
         tx.open_table(BRC20_BALANCES)?;
         tx.open_table(BRC20_TOKEN)?;
         tx.open_table(BRC20_EVENTS)?;
-        tx.open_table(BRC20_TRANSFERABLELOG)?;
-        tx.open_table(BRC20_INSCRIBE_TRANSFER)?;
+        tx.open_table(BRC20_SATPOINT_TO_TRANSFERABLE_ASSETS)?;
 
         {
           let mut outpoint_to_sat_ranges = tx.open_table(OUTPOINT_TO_SAT_RANGES)?;
@@ -424,17 +429,13 @@ impl Index {
     })
   }
 
-  pub(crate) fn get_chain_network(&self) -> Network {
-    self.options.chain().network()
-  }
-
   pub(crate) fn get_chain(&self) -> Chain {
     self.options.chain()
   }
 
   pub(crate) fn get_extend_change_address(&self) -> Option<Address> {
     let address = Address::from_str(self.options.extend_change_address().as_str())
-      .and_then(|address| address.require_network(self.get_chain_network()));
+      .and_then(|address| address.require_network(self.get_chain().network()));
 
     match address {
       Ok(address) => Some(address),
@@ -463,6 +464,10 @@ impl Index {
 
   pub(crate) fn has_rune_index(&self) -> bool {
     self.index_runes
+  }
+
+  pub(crate) fn has_transactions_index(&self) -> bool {
+    self.index_transactions
   }
 
   pub(crate) fn has_sat_index(&self) -> bool {
@@ -647,7 +652,7 @@ impl Index {
       total_bytes,
       COLLECTIONS_KEY_TO_INSCRIPTION_ID,
     );
-    insert_table_info(
+    insert_multimap_table_info(
       &mut tables,
       &wtx,
       total_bytes,
@@ -656,8 +661,18 @@ impl Index {
     insert_table_info(&mut tables, &wtx, total_bytes, BRC20_BALANCES);
     insert_table_info(&mut tables, &wtx, total_bytes, BRC20_TOKEN);
     insert_table_info(&mut tables, &wtx, total_bytes, BRC20_EVENTS);
-    insert_table_info(&mut tables, &wtx, total_bytes, BRC20_TRANSFERABLELOG);
-    insert_table_info(&mut tables, &wtx, total_bytes, BRC20_INSCRIBE_TRANSFER);
+    insert_table_info(
+      &mut tables,
+      &wtx,
+      total_bytes,
+      BRC20_SATPOINT_TO_TRANSFERABLE_ASSETS,
+    );
+    insert_multimap_table_info(
+      &mut tables,
+      &wtx,
+      total_bytes,
+      BRC20_ADDRESS_TICKER_TO_TRANSFERABLE_ASSETS,
+    );
 
     for table in wtx.list_tables()? {
       assert!(tables.contains_key(table.name()));
@@ -813,8 +828,12 @@ impl Index {
     Ok(())
   }
 
-  fn begin_read(&self) -> Result<rtx::Rtx> {
+  pub(crate) fn begin_read(&self) -> Result<rtx::Rtx> {
     Ok(rtx::Rtx(self.database.begin_read()?))
+  }
+
+  pub(crate) fn bitcoin_rpc_client(&self) -> Result<Client> {
+    self.options.bitcoin_rpc_client(None)
   }
 
   fn begin_write(&self) -> Result<WriteTransaction> {
@@ -870,27 +889,6 @@ impl Index {
       .unwrap_or_default()
   }
 
-  pub(crate) fn height_btc(&self, query_btc: bool) -> Result<(Option<Height>, Option<Height>)> {
-    let ord_height = self.block_height()?;
-    if let Some(height) = ord_height {
-      if query_btc {
-        let btc_height = match self.client.get_blockchain_info() {
-          Ok(info) => Height(u32::try_from(info.headers).unwrap()),
-          Err(e) => {
-            return Err(anyhow!(
-              "failed to get blockchain info from bitcoin node: {}",
-              e.to_string()
-            ));
-          }
-        };
-        return Ok((Some(height), Some(btc_height)));
-      }
-      Ok((Some(height), None))
-    } else {
-      Ok((None, None))
-    }
-  }
-
   pub(crate) fn block_count(&self) -> Result<u32> {
     self.begin_read()?.block_count()
   }
@@ -901,10 +899,6 @@ impl Index {
 
   pub(crate) fn block_hash(&self, height: Option<u32>) -> Result<Option<BlockHash>> {
     self.begin_read()?.block_hash(height)
-  }
-
-  pub(crate) fn latest_block(&self) -> Result<Option<(Height, BlockHash)>> {
-    self.begin_read()?.latest_block()
   }
 
   pub(crate) fn blocks(&self, take: usize) -> Result<Vec<(u32, BlockHash)>> {
@@ -1180,10 +1174,6 @@ impl Index {
 
   pub(crate) fn get_block_by_hash(&self, hash: BlockHash) -> Result<Option<Block>> {
     self.client.get_block(&hash).into_option()
-  }
-
-  pub(crate) fn get_block_info_by_hash(&self, hash: BlockHash) -> Result<Option<GetBlockResult>> {
-    self.client.get_block_info(&hash).into_option()
   }
 
   pub(crate) fn list_unspent(
@@ -1474,6 +1464,7 @@ impl Index {
     .transpose()
   }
 
+  #[allow(unused)]
   pub(crate) fn get_inscription_id_by_inscription_number(
     &self,
     inscription_number: i32,
@@ -1516,25 +1507,6 @@ impl Index {
       .map(|satpoint| Entry::load(*satpoint.value()));
 
     Ok(satpoint)
-  }
-
-  pub(crate) fn ord_get_collections_by_inscription_id(
-    &self,
-    inscription_id: InscriptionId,
-  ) -> Result<Option<Vec<CollectionKind>>> {
-    let rtx = self.database.begin_read()?;
-    let table = rtx.open_table(COLLECTIONS_INSCRIPTION_ID_TO_KINDS)?;
-    get_collections_of_inscription(&table, &inscription_id)
-  }
-
-  pub(crate) fn ord_get_district_inscription_id(
-    &self,
-    number: u32,
-  ) -> Result<Option<InscriptionId>> {
-    let district = District { number };
-    let rtx = self.database.begin_read()?;
-    let table = rtx.open_table(COLLECTIONS_KEY_TO_INSCRIPTION_ID)?;
-    get_collection_inscription_id(&table, &district.to_collection_key())
   }
 
   pub(crate) fn get_inscription_by_id(
@@ -1613,17 +1585,6 @@ impl Index {
     )
   }
 
-  pub(crate) fn get_outpoint_entry(&self, outpoint: OutPoint) -> Result<Option<TxOut>> {
-    Ok(
-      self
-        .database
-        .begin_read()?
-        .open_table(OUTPOINT_TO_ENTRY)?
-        .get(&outpoint.store())?
-        .map(|x| Decodable::consensus_decode(&mut io::Cursor::new(x.value())).unwrap()),
-    )
-  }
-
   pub(crate) fn get_transaction(&self, txid: Txid) -> Result<Option<Transaction>> {
     if txid == self.genesis_block_coinbase_txid {
       return Ok(Some(self.genesis_block_coinbase_transaction.clone()));
@@ -1641,37 +1602,6 @@ impl Index {
     }
 
     self.client.get_raw_transaction(&txid, None).into_option()
-  }
-
-  pub(crate) fn get_transaction_with_retries(&self, txid: Txid) -> Result<Option<Transaction>> {
-    Self::get_transaction_retries(&self.client, txid)
-  }
-
-  pub(crate) fn get_transaction_retries(
-    client: &Client,
-    txid: Txid,
-  ) -> Result<Option<Transaction>> {
-    let mut errors = 0;
-    loop {
-      match client.get_raw_transaction(&txid, None).into_option() {
-        Err(err) => {
-          if cfg!(test) {
-            return Err(err);
-          }
-          errors += 1;
-          let seconds = 1 << errors;
-          log::warn!("failed to fetch transaction {txid}, retrying in {seconds}s: {err}");
-
-          if seconds > 120 {
-            log::error!("would sleep for more than 120s, giving up");
-            return Err(err);
-          }
-
-          thread::sleep(Duration::from_secs(seconds));
-        }
-        Ok(result) => return Ok(result),
-      }
-    }
   }
 
   pub(crate) fn get_transaction_blockhash(&self, txid: Txid) -> Result<Option<BlockHash>> {
@@ -2311,143 +2241,6 @@ impl Index {
       .map(|(_sequence_number, satpoint, inscription_id)| (satpoint, inscription_id))
       .collect(),
     )
-  }
-
-  pub(crate) fn ord_txid_inscriptions(
-    &self,
-    txid: &Txid,
-  ) -> Result<Option<Vec<ord::InscriptionOp>>> {
-    let rtx = self.database.begin_read()?;
-    let table = rtx.open_table(ORD_TX_TO_OPERATIONS)?;
-    let res = get_transaction_operations(&table, txid)?;
-
-    if res.is_empty() {
-      let tx = self.client.get_raw_transaction_info(txid, None)?;
-      if let Some(tx_blockhash) = tx.blockhash {
-        let tx_bh = self.client.get_block_header_info(&tx_blockhash)?;
-        let parsed_height = self.block_height()?;
-        if parsed_height.is_none() || u32::try_from(tx_bh.height)? > parsed_height.unwrap().0 {
-          return Ok(None);
-        }
-      } else {
-        return Err(anyhow!("can't get tx block hash: {txid}"));
-      }
-    }
-
-    Ok(Some(res))
-  }
-  pub(crate) fn ord_get_txs_inscriptions(
-    &self,
-    txs: &Vec<Txid>,
-  ) -> Result<Vec<(bitcoin::Txid, Vec<ord::InscriptionOp>)>> {
-    let rtx = self.database.begin_read()?;
-    let table = rtx.open_table(ORD_TX_TO_OPERATIONS)?;
-    let mut result = Vec::new();
-    for txid in txs {
-      let inscriptions = get_transaction_operations(&table, txid)?;
-      if inscriptions.is_empty() {
-        continue;
-      }
-      result.push((*txid, inscriptions));
-    }
-    Ok(result)
-  }
-
-  pub(crate) fn brc20_get_tick_info(&self, name: &brc20::Tick) -> Result<Option<brc20::TokenInfo>> {
-    let rtx = self.database.begin_read().unwrap();
-    let table = rtx.open_table(BRC20_TOKEN)?;
-    let info = get_token_info(&table, name)?;
-    Ok(info)
-  }
-
-  pub(crate) fn brc20_get_all_tick_info(&self) -> Result<Vec<brc20::TokenInfo>> {
-    let rtx = self.database.begin_read().unwrap();
-    let table = rtx.open_table(BRC20_TOKEN)?;
-    let info = get_tokens_info(&table)?;
-    Ok(info)
-  }
-
-  pub(crate) fn brc20_get_balance_by_address(
-    &self,
-    tick: &brc20::Tick,
-    address: &Address,
-  ) -> Result<Option<brc20::Balance>> {
-    let rtx = self.database.begin_read().unwrap();
-    let table = rtx.open_table(BRC20_BALANCES)?;
-    let bal = get_balance(&table, &ScriptKey::from_address(address.clone()), tick)?;
-    Ok(bal)
-  }
-
-  pub(crate) fn brc20_get_all_balance_by_address(
-    &self,
-    address: &bitcoin::Address,
-  ) -> Result<Vec<brc20::Balance>> {
-    let rtx = self.database.begin_read().unwrap();
-    let table = rtx.open_table(BRC20_BALANCES)?;
-    get_balances(&table, &ScriptKey::from_address(address.clone()))
-  }
-
-  pub(crate) fn brc20_get_tx_events_by_txid(
-    &self,
-    txid: &bitcoin::Txid,
-  ) -> Result<Option<Vec<brc20::Receipt>>> {
-    let rtx = self.database.begin_read().unwrap();
-    let table = rtx.open_table(BRC20_EVENTS)?;
-    let res = get_transaction_receipts(&table, txid)?;
-
-    if res.is_empty() {
-      let tx = self.client.get_raw_transaction_info(txid, None)?;
-      if let Some(tx_blockhash) = tx.blockhash {
-        let tx_bh = self.client.get_block_header_info(&tx_blockhash)?;
-        let parsed_height = self.begin_read()?.block_height()?;
-        if parsed_height.is_none() || u32::try_from(tx_bh.height)? > parsed_height.unwrap().0 {
-          return Ok(None);
-        }
-      } else {
-        return Err(anyhow!("can't get tx block hash: {txid}"));
-      }
-    }
-
-    Ok(Some(res))
-  }
-
-  pub(crate) fn brc20_get_txs_events(
-    &self,
-    txs: &Vec<Txid>,
-  ) -> Result<Vec<(bitcoin::Txid, Vec<brc20::Receipt>)>> {
-    let rtx = self.database.begin_read()?;
-    let table = rtx.open_table(BRC20_EVENTS)?;
-    let mut result = Vec::new();
-    for txid in txs {
-      let tx_events = get_transaction_receipts(&table, txid)?;
-      if tx_events.is_empty() {
-        continue;
-      }
-      result.push((*txid, tx_events));
-    }
-    Ok(result)
-  }
-
-  pub(crate) fn brc20_get_tick_transferable_by_address(
-    &self,
-    tick: &brc20::Tick,
-    address: &bitcoin::Address,
-  ) -> Result<Vec<brc20::TransferableLog>> {
-    let rtx = self.database.begin_read().unwrap();
-    let table = rtx.open_table(BRC20_TRANSFERABLELOG)?;
-    let res = get_transferable_by_tick(&table, &ScriptKey::from_address(address.clone()), tick)?;
-    Ok(res)
-  }
-
-  pub(crate) fn brc20_get_all_transferable_by_address(
-    &self,
-    address: &bitcoin::Address,
-  ) -> Result<Vec<brc20::TransferableLog>> {
-    let rtx = self.database.begin_read().unwrap();
-    let table = rtx.open_table(BRC20_TRANSFERABLELOG)?;
-    let res = get_transferable(&table, &ScriptKey::from_address(address.clone()))?;
-
-    Ok(res)
   }
 }
 

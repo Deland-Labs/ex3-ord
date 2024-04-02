@@ -1,41 +1,44 @@
 use {
   super::{error::ApiError, types::ScriptPubkey, *},
-  crate::okx::datastore::{
-    ord::{Action, InscriptionOp},
-    ScriptKey,
+  crate::{
+    index::rtx::Rtx,
+    okx::datastore::{
+      ord::{Action, InscriptionOp},
+      ScriptKey,
+    },
   },
   axum::Json,
   utoipa::ToSchema,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(as = ord::InscriptionAction)]
+#[schema(as = ord::ApiInscriptionAction)]
 #[serde(rename_all = "camelCase")]
-pub enum InscriptionAction {
+pub enum ApiInscriptionAction {
   /// New inscription
   New { cursed: bool, unbound: bool },
   /// Transfer inscription
   Transfer,
 }
 
-impl From<Action> for InscriptionAction {
+impl From<Action> for ApiInscriptionAction {
   fn from(action: Action) -> Self {
     match action {
       Action::New {
         cursed, unbound, ..
-      } => InscriptionAction::New { cursed, unbound },
-      Action::Transfer => InscriptionAction::Transfer,
+      } => ApiInscriptionAction::New { cursed, unbound },
+      Action::Transfer => ApiInscriptionAction::Transfer,
     }
   }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(as = ord::TxInscription)]
+#[schema(as = ord::ApiTxInscription)]
 #[serde(rename_all = "camelCase")]
-pub struct TxInscription {
+pub struct ApiTxInscription {
   /// The action of the inscription.
-  #[schema(value_type = ord::InscriptionAction)]
-  pub action: InscriptionAction,
+  #[schema(value_type = ord::ApiInscriptionAction)]
+  pub action: ApiInscriptionAction,
   /// The inscription number.
   pub inscription_number: Option<i32>,
   /// The inscription id.
@@ -50,62 +53,64 @@ pub struct TxInscription {
   pub to: Option<ScriptPubkey>,
 }
 
-impl TxInscription {
-  pub(super) fn new(op: InscriptionOp, index: Arc<Index>) -> Result<Self> {
-    let from = index
-      .get_outpoint_entry(op.old_satpoint.outpoint)?
-      .map(|txout| ScriptKey::from_script(&txout.script_pubkey, index.get_chain_network()))
-      .ok_or(anyhow!(
-        "outpoint {} not found from database",
-        op.old_satpoint.outpoint
-      ))?
-      .into();
-    let to = match op.new_satpoint {
-      Some(new_satpoint) => {
-        if new_satpoint.outpoint == unbound_outpoint() {
-          None
-        } else {
-          Some(
-            index
-              .get_outpoint_entry(new_satpoint.outpoint)?
-              .map(|txout| ScriptKey::from_script(&txout.script_pubkey, index.get_chain_network()))
-              .ok_or(anyhow!(
-                "outpoint {} not found from database",
-                new_satpoint.outpoint
-              ))?
-              .into(),
-          )
-        }
-      }
-      None => None,
+impl ApiTxInscription {
+  pub(super) fn parse_from_operation(
+    operation: InscriptionOp,
+    rtx: &Rtx,
+    client: &Client,
+    chain: Chain,
+    index_transactions: bool,
+  ) -> Result<Self> {
+    let prevout = Index::fetch_vout(
+      rtx,
+      client,
+      operation.old_satpoint.outpoint,
+      chain,
+      index_transactions,
+    )?
+    .ok_or(OrdApiError::Internal(format!(
+      "Failed to get inscription prevout: {}",
+      operation.old_satpoint.outpoint
+    )))?;
+
+    let output = match operation.new_satpoint {
+      Some(new_satpoint) if new_satpoint.outpoint != unbound_outpoint() => Index::fetch_vout(
+        rtx,
+        client,
+        new_satpoint.outpoint,
+        chain,
+        index_transactions,
+      )?,
+      _ => None,
     };
-    Ok(TxInscription {
-      from,
-      to,
-      action: op.action.into(),
-      inscription_number: op.inscription_number,
-      inscription_id: op.inscription_id.to_string(),
-      old_satpoint: op.old_satpoint.to_string(),
-      new_satpoint: op.new_satpoint.map(|v| v.to_string()),
+
+    Ok(ApiTxInscription {
+      from: ScriptKey::from_script(&prevout.script_pubkey, chain).into(),
+      to: output.map(|v| ScriptKey::from_script(&v.script_pubkey, chain).into()),
+      action: operation.action.into(),
+      inscription_number: operation.inscription_number,
+      inscription_id: operation.inscription_id.to_string(),
+      old_satpoint: operation.old_satpoint.to_string(),
+      new_satpoint: operation.new_satpoint.map(|v| v.to_string()),
     })
   }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(as = ord::TxInscriptions)]
+#[schema(as = ord::ApiTxInscriptions)]
 #[serde(rename_all = "camelCase")]
-pub struct TxInscriptions {
-  #[schema(value_type = Vec<ord::TxInscription>)]
-  pub inscriptions: Vec<TxInscription>,
+pub struct ApiTxInscriptions {
+  #[schema(value_type = Vec<ord::ApiTxInscription>)]
+  pub inscriptions: Vec<ApiTxInscription>,
   pub txid: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(as = ord::BlockInscriptions)]
+#[schema(as = ord::ApiBlockInscriptions)]
 #[serde(rename_all = "camelCase")]
-pub struct BlockInscriptions {
-  #[schema(value_type = Vec<ord::TxInscriptions>)]
-  pub block: Vec<TxInscriptions>,
+pub struct ApiBlockInscriptions {
+  #[schema(value_type = Vec<ord::ApiTxInscriptions>)]
+  pub block: Vec<ApiTxInscriptions>,
 }
 
 // ord/tx/:txid/inscriptions
@@ -126,31 +131,30 @@ pub struct BlockInscriptions {
 pub(crate) async fn ord_txid_inscriptions(
   Extension(index): Extension<Arc<Index>>,
   Path(txid): Path<String>,
-) -> ApiResult<TxInscriptions> {
+) -> ApiResult<ApiTxInscriptions> {
   log::debug!("rpc: get ord_txid_inscriptions: {}", txid);
   let txid = Txid::from_str(&txid).map_err(ApiError::bad_request)?;
+  let rtx = index.begin_read()?;
+  let client = index.bitcoin_rpc_client()?;
+  let index_transactions = index.has_transactions_index();
 
-  let ops = index
-    .ord_txid_inscriptions(&txid)?
-    .ok_or_api_not_found(OrdError::OperationNotFound)?;
-
-  log::debug!("rpc: get ord_txid_inscriptions: {:?}", ops);
+  let operations = Index::get_ord_inscription_operations(txid, &rtx, &client)?
+    .ok_or(OrdApiError::TransactionReceiptNotFound(txid))?;
+  log::debug!("rpc: get ord_txid_inscriptions: {:?}", operations);
 
   let mut api_tx_inscriptions = Vec::new();
-  for op in ops.into_iter() {
-    match TxInscription::new(op, index.clone()) {
-      Ok(tx_inscription) => {
-        api_tx_inscriptions.push(tx_inscription);
-      }
-      Err(error) => {
-        return Err(ApiError::internal(format!(
-          "Failed to get transaction inscriptions for {txid}, error: {error}"
-        )));
-      }
-    }
+  for operation in operations.into_iter() {
+    let tx_inscription = ApiTxInscription::parse_from_operation(
+      operation,
+      &rtx,
+      &client,
+      index.get_chain(),
+      index_transactions,
+    )?;
+    api_tx_inscriptions.push(tx_inscription);
   }
 
-  Ok(Json(ApiResponse::ok(TxInscriptions {
+  Ok(Json(ApiResponse::ok(ApiTxInscriptions {
     inscriptions: api_tx_inscriptions,
     txid: txid.to_string(),
   })))
@@ -174,56 +178,38 @@ pub(crate) async fn ord_txid_inscriptions(
 pub(crate) async fn ord_block_inscriptions(
   Extension(index): Extension<Arc<Index>>,
   Path(blockhash): Path<String>,
-) -> ApiResult<BlockInscriptions> {
+) -> ApiResult<ApiBlockInscriptions> {
   log::debug!("rpc: get ord_block_inscriptions: {}", blockhash);
 
   let blockhash = bitcoin::BlockHash::from_str(&blockhash).map_err(ApiError::bad_request)?;
-  // get block from btc client.
-  let blockinfo = index
-    .get_block_info_by_hash(blockhash)
-    .map_err(ApiError::internal)?
-    .ok_or_api_not_found(OrdError::BlockNotFound)?;
+  let rtx = index.begin_read()?;
+  let client = index.bitcoin_rpc_client()?;
+  let index_transactions = index.has_transactions_index();
 
-  // get blockhash from redb.
-  let blockhash = index
-    .block_hash(Some(u32::try_from(blockinfo.height).unwrap()))
-    .map_err(ApiError::internal)?
-    .ok_or_api_not_found(OrdError::BlockNotFound)?;
+  let block_operations = Index::get_ord_block_inscription_operations(blockhash, &rtx, &client)?;
+  log::debug!("rpc: get ord_block_inscriptions: {:?}", block_operations);
 
-  // check of conflicting block.
-  if blockinfo.hash != blockhash {
-    return Err(ApiError::NotFound(OrdError::BlockNotFound.to_string()));
-  }
-
-  let block_inscriptions = index
-    .ord_get_txs_inscriptions(&blockinfo.tx)
-    .map_err(ApiError::internal)?;
-
-  log::debug!("rpc: get ord_block_inscriptions: {:?}", block_inscriptions);
-
-  let mut api_block_inscriptions = Vec::new();
-  for (txid, ops) in block_inscriptions {
-    let mut api_tx_inscriptions = Vec::new();
-    for op in ops.into_iter() {
-      match TxInscription::new(op, index.clone()) {
-        Ok(tx_inscription) => {
-          api_tx_inscriptions.push(tx_inscription);
-        }
-        Err(error) => {
-          return Err(ApiError::internal(format!(
-            "Failed to get transaction inscriptions for {txid}, error: {error}"
-          )));
-        }
-      }
+  let mut api_block_operations = Vec::new();
+  for (txid, tx_operations) in block_operations.into_iter() {
+    let mut api_tx_operations = Vec::new();
+    for operation in tx_operations.into_iter() {
+      let tx_inscription = ApiTxInscription::parse_from_operation(
+        operation,
+        &rtx,
+        &client,
+        index.get_chain(),
+        index_transactions,
+      )?;
+      api_tx_operations.push(tx_inscription);
     }
-    api_block_inscriptions.push(TxInscriptions {
-      inscriptions: api_tx_inscriptions,
+    api_block_operations.push(ApiTxInscriptions {
+      inscriptions: api_tx_operations,
       txid: txid.to_string(),
     });
   }
 
-  Ok(Json(ApiResponse::ok(BlockInscriptions {
-    block: api_block_inscriptions,
+  Ok(Json(ApiResponse::ok(ApiBlockInscriptions {
+    block: api_block_operations,
   })))
 }
 
@@ -235,13 +221,13 @@ mod tests {
 
   #[test]
   fn serialize_ord_inscriptions() {
-    let mut tx_inscription = TxInscription {
+    let mut tx_inscription = ApiTxInscription {
       from: ScriptKey::from_script(
         &Address::from_str("bc1qhvd6suvqzjcu9pxjhrwhtrlj85ny3n2mqql5w4")
           .unwrap()
           .assume_checked()
           .script_pubkey(),
-        Network::Bitcoin,
+        Chain::Mainnet,
       )
       .into(),
       to: Some(
@@ -250,11 +236,11 @@ mod tests {
             .unwrap()
             .assume_checked()
             .script_pubkey(),
-          Network::Bitcoin,
+          Chain::Mainnet,
         )
         .into(),
       ),
-      action: InscriptionAction::New {
+      action: ApiInscriptionAction::New {
         cursed: false,
         unbound: false,
       },
@@ -299,7 +285,7 @@ mod tests {
   }
 }"#,
     );
-    tx_inscription.action = InscriptionAction::Transfer;
+    tx_inscription.action = ApiInscriptionAction::Transfer;
     assert_eq!(
       serde_json::to_string_pretty(&tx_inscription).unwrap(),
       r#"{

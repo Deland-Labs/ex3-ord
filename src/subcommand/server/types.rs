@@ -20,7 +20,9 @@ impl From<ScriptKey> for ScriptPubkey {
   fn from(script_key: ScriptKey) -> Self {
     match script_key {
       ScriptKey::Address(address) => ScriptPubkey::Address(address.assume_checked().to_string()),
-      ScriptKey::ScriptHash(hash) => ScriptPubkey::NonStandard(hash.to_string()),
+      ScriptKey::ScriptHash { script_hash, .. } => {
+        ScriptPubkey::NonStandard(script_hash.to_string())
+      }
     }
   }
 }
@@ -34,7 +36,7 @@ mod tests {
         .unwrap()
         .assume_checked()
         .script_pubkey(),
-      Network::Bitcoin,
+      Chain::Mainnet,
     )
     .into();
     assert_eq!(
@@ -49,7 +51,7 @@ mod tests {
         .unwrap()
         .as_slice(),
       ),
-      Network::Bitcoin,
+      Chain::Mainnet,
     )
     .into();
 

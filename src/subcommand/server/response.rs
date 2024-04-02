@@ -4,21 +4,21 @@ use {
 };
 #[derive(Default, Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[aliases(
-  BRC20Tick = ApiResponse<brc20::TickInfo>,
-  BRC20AllTick = ApiResponse<brc20::AllTickInfo>,
-  BRC20Balance = ApiResponse<brc20::Balance>,
-  BRC20AllBalance = ApiResponse<brc20::AllBalance>,
-  BRC20TxEvents = ApiResponse<brc20::TxEvents>,
-  BRC20BlockEvents = ApiResponse<brc20::BlockEvents>,
-  BRC20Transferable = ApiResponse<brc20::TransferableInscriptions>,
+  ApiBRC20Tick = ApiResponse<brc20::ApiTickInfo>,
+  ApiBRC20AllTick = ApiResponse<brc20::ApiTickInfos>,
+  ApiBRC20Balance = ApiResponse<brc20::ApiBalance>,
+  ApiBRC20AllBalance = ApiResponse<brc20::ApiBalances>,
+  ApiBRC20TxEvents = ApiResponse<brc20::ApiTxEvents>,
+  ApiBRC20BlockEvents = ApiResponse<brc20::ApiBlockEvents>,
+  ApiBRC20Transferable = ApiResponse<brc20::ApiTransferableAssets>,
 
-  WalletAvailableUnspentOutputs = ApiResponse<wallet::AvailableUnspentOutputs>,
+  WalletApiAvailableUnspentOutputs = ApiResponse<wallet::ApiAvailableUnspentOutputs>,
 
-  OrdOrdInscription = ApiResponse<ord::OrdInscription>,
-  OrdOutPointData = ApiResponse<ord::OutPointData>,
-  OrdOutPointResult = ApiResponse<ord::OutPointResult>,
-  OrdTxInscriptions = ApiResponse<ord::TxInscriptions>,
-  OrdBlockInscriptions = ApiResponse<ord::BlockInscriptions>,
+  ApiOrdInscription = ApiResponse<ord::ApiInscription>,
+  ApiOrdOutPointData = ApiResponse<ord::ApiOutpointInscriptions>,
+  ApiOrdOutPointResult = ApiResponse<ord::ApiOutPointResult>,
+  ApiOrdTxInscriptions = ApiResponse<ord::ApiTxInscriptions>,
+  ApiOrdBlockInscriptions = ApiResponse<ord::ApiBlockInscriptions>,
 
   Node = ApiResponse<NodeInfo>
 )]

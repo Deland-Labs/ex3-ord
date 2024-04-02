@@ -3,7 +3,7 @@ use {super::*, crate::okx::datastore::brc20::Tick, axum::Json, utoipa::ToSchema}
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 #[schema(as = brc20::Balance)]
-pub struct Balance {
+pub struct ApiBalance {
   /// Name of the ticker.
   pub tick: String,
   /// Available balance.
@@ -37,25 +37,24 @@ pub struct Balance {
 pub(crate) async fn brc20_balance(
   Extension(index): Extension<Arc<Index>>,
   Path((tick, address)): Path<(String, String)>,
-) -> ApiResult<Balance> {
+) -> ApiResult<ApiBalance> {
   log::debug!("rpc: get brc20_balance: {} {}", tick, address);
 
-  let tick =
-    Tick::from_str(&tick).map_err(|_| ApiError::bad_request(BRC20Error::IncorrectTickFormat))?;
+  let rtx = index.begin_read()?;
+  let chain = index.get_chain();
 
-  let address: bitcoin::Address = Address::from_str(&address)
-    .and_then(|address| address.require_network(index.get_chain_network()))
+  let ticker = Tick::from_str(&tick).map_err(|_| BRC20ApiError::InvalidTicker(tick.clone()))?;
+  let script_key = utils::parse_and_validate_script_key_with_chain(&address, chain)
     .map_err(ApiError::bad_request)?;
 
-  let balance = index
-    .brc20_get_balance_by_address(&tick, &address)?
-    .ok_or_api_not_found(BRC20Error::BalanceNotFound)?;
+  let balance = Index::get_brc20_balance_by_tick_and_address(ticker, script_key, &rtx)?
+    .ok_or(BRC20ApiError::UnknownTicker(tick.clone()))?;
 
   let available_balance = balance.overall_balance - balance.transferable_balance;
 
   log::debug!("rpc: get brc20_balance: {} {} {:?}", tick, address, balance);
 
-  Ok(Json(ApiResponse::ok(Balance {
+  Ok(Json(ApiResponse::ok(ApiBalance {
     tick: balance.tick.to_string(),
     available_balance: available_balance.to_string(),
     transferable_balance: balance.transferable_balance.to_string(),
@@ -66,9 +65,9 @@ pub(crate) async fn brc20_balance(
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 #[schema(as = brc20::AllBalance)]
-pub struct AllBalance {
+pub struct ApiBalances {
   #[schema(value_type = Vec<brc20::Balance>)]
-  pub balance: Vec<Balance>,
+  pub balance: Vec<ApiBalance>,
 }
 
 /// Get all ticker balances of the address.
@@ -89,22 +88,23 @@ pub struct AllBalance {
   )]
 pub(crate) async fn brc20_all_balance(
   Extension(index): Extension<Arc<Index>>,
-  Path(address): Path<String>,
-) -> ApiResult<AllBalance> {
-  log::debug!("rpc: get brc20_all_balance: {}", address);
+  Path(account): Path<String>,
+) -> ApiResult<ApiBalances> {
+  log::debug!("rpc: get brc20_all_balance: {}", account);
 
-  let address: bitcoin::Address = Address::from_str(&address)
-    .and_then(|address| address.require_network(index.get_chain_network()))
+  let rtx = index.begin_read()?;
+  let chain = index.get_chain();
+
+  let script_key = utils::parse_and_validate_script_key_with_chain(&account, chain)
     .map_err(ApiError::bad_request)?;
 
-  let all_balance = index.brc20_get_all_balance_by_address(&address)?;
+  let all_balance = rtx.brc20_get_all_balance_by_address(script_key)?;
+  log::debug!("rpc: get brc20_all_balance: {} {:?}", account, all_balance);
 
-  log::debug!("rpc: get brc20_all_balance: {} {:?}", address, all_balance);
-
-  Ok(Json(ApiResponse::ok(AllBalance {
+  Ok(Json(ApiResponse::ok(ApiBalances {
     balance: all_balance
-      .iter()
-      .map(|bal| Balance {
+      .into_iter()
+      .map(|bal| ApiBalance {
         tick: bal.tick.to_string(),
         available_balance: (bal.overall_balance - bal.transferable_balance).to_string(),
         transferable_balance: bal.transferable_balance.to_string(),

@@ -6,9 +6,9 @@ use {
 };
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(as = ord::InscriptionDigest)]
+#[schema(as = ord::ApiInscriptionDigest)]
 #[serde(rename_all = "camelCase")]
-pub struct InscriptionDigest {
+pub struct ApiInscriptionDigest {
   /// The inscription id.
   pub id: String,
   /// The inscription number.
@@ -18,20 +18,20 @@ pub struct InscriptionDigest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(as = ord::OutPointResult)]
+#[schema(as = ord::ApiOutPointResult)]
 #[serde(rename_all = "camelCase")]
-pub struct OutPointResult {
-  #[schema(value_type = Option<ord::OutPointData>)]
-  pub result: Option<OutPointData>,
+pub struct ApiOutPointResult {
+  #[schema(value_type = Option<ord::ApiOutpointInscriptions>)]
+  pub result: Option<ApiOutpointInscriptions>,
   pub latest_blockhash: String,
   #[schema(format = "uint64")]
   pub latest_height: u32,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[schema(as = ord::OutPointData)]
+#[schema(as = ord::ApiOutpointInscriptions)]
 #[serde(rename_all = "camelCase")]
-pub struct OutPointData {
+pub struct ApiOutpointInscriptions {
   /// The transaction id.
   pub txid: String,
   /// The script pubkey.
@@ -41,9 +41,9 @@ pub struct OutPointData {
   /// The value of the transaction output.
   #[schema(format = "uint64")]
   pub value: u64,
-  #[schema(value_type = Vec<ord::InscriptionDigest>)]
+  #[schema(value_type = Vec<ord::ApiInscriptionDigest>)]
   /// The inscriptions on the transaction output.
-  pub inscription_digest: Vec<InscriptionDigest>,
+  pub inscription_digest: Vec<ApiInscriptionDigest>,
 }
 
 // /ord/outpoint/:outpoint/info
@@ -64,67 +64,55 @@ pub struct OutPointData {
 pub(crate) async fn ord_outpoint(
   Extension(index): Extension<Arc<Index>>,
   Path(outpoint): Path<OutPoint>,
-) -> ApiResult<OutPointResult> {
+) -> ApiResult<ApiOutPointResult> {
   log::debug!("rpc: get ord_outpoint: {outpoint}");
 
-  let (latest_height, latest_blockhash) = index
-    .latest_block()
-    .ok()
-    .flatten()
-    .ok_or_api_err(|| ApiError::internal("Failed to get the latest block."))?;
+  let rtx = index.begin_read()?;
 
-  let inscriptions = index.get_inscriptions_on_output(outpoint)?;
-  if inscriptions.is_empty() {
-    return Ok(Json(ApiResponse::ok(OutPointResult {
+  let (latest_height, latest_blockhash) = rtx.latest_block()?.ok_or_api_err(|| {
+    OrdApiError::Internal("Failed to retrieve the latest block from the database.".to_string())
+      .into()
+  })?;
+
+  let inscriptions_with_satpoints = rtx.inscriptions_on_output_with_satpoints(outpoint)?;
+  let chain = index.get_chain();
+
+  // If there are no inscriptions on the output, return None and parsed block states.
+  if inscriptions_with_satpoints.is_empty() {
+    return Ok(Json(ApiResponse::ok(ApiOutPointResult {
       result: None,
       latest_height: latest_height.n(),
       latest_blockhash: latest_blockhash.to_string(),
     })));
   }
 
-  // Get the txout from the database store or from an RPC request.
-  let vout = index
-    .get_outpoint_entry(outpoint)
-    .ok()
-    .flatten()
-    .or_else(|| {
-      index
-        .get_transaction_with_retries(outpoint.txid)
-        .ok()
-        .flatten()
-        .map(|tx| {
-          tx.output
-            .get(usize::try_from(outpoint.vout).unwrap())
-            .unwrap()
-            .to_owned()
-        })
-    })
-    .ok_or_api_err(|| ApiError::not_found("Failed to fetch tx output."))?;
-
-  let mut inscription_digests = Vec::with_capacity(inscriptions.len());
-  for id in inscriptions {
-    inscription_digests.push(InscriptionDigest {
-      id: id.to_string(),
-      number: index
-        .get_inscription_entry(id)?
-        .map(|entry| entry.inscription_number)
-        .ok_or(anyhow!(
-          "Failed to get the inscription number by ID, there may be an error in the database."
-        ))?,
-      location: index
-        .get_inscription_satpoint_by_id(id)?
-        .ok_or(anyhow!(
-          "Failed to get the inscription location, there may be an error in the database."
-        ))?
-        .to_string(),
+  let mut inscription_digests = Vec::with_capacity(inscriptions_with_satpoints.len());
+  for (satpoint, inscription_id) in inscriptions_with_satpoints {
+    inscription_digests.push(ApiInscriptionDigest {
+      id: inscription_id.to_string(),
+      number: rtx
+        .get_inscription_entry(inscription_id)?
+        .map(|inscription_entry| inscription_entry.inscription_number)
+        .ok_or(OrdApiError::UnknownInscriptionId(inscription_id))?,
+      location: satpoint.to_string(),
     });
   }
 
-  Ok(Json(ApiResponse::ok(OutPointResult {
-    result: Some(OutPointData {
+  // Get the txout from the database store or from an RPC request.
+  let vout = Index::fetch_vout(
+    &rtx,
+    &index.bitcoin_rpc_client()?,
+    outpoint,
+    chain,
+    index.has_transactions_index(),
+  )?
+  .ok_or(OrdApiError::TransactionNotFound(outpoint.txid))?;
+
+  Ok(Json(ApiResponse::ok(ApiOutPointResult {
+    result: Some(ApiOutpointInscriptions {
       txid: outpoint.txid.to_string(),
       script_pub_key: vout.script_pubkey.to_asm_string(),
-      owner: ScriptKey::from_script(&vout.script_pubkey, index.get_chain_network()).into(),
+      owner: ScriptKey::from_script(&vout.script_pubkey, chain).into(),
       value: vout.value,
       inscription_digest: inscription_digests,
     }),

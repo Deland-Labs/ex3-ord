@@ -2,7 +2,8 @@ use super::*;
 use crate::{InscriptionId, SatPoint};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, strum_macros::Display)]
+#[strum(serialize_all = "camelCase")]
 pub enum OperationType {
   Deploy,
   Mint,
@@ -25,7 +26,7 @@ pub struct Receipt {
 pub enum Event {
   Deploy(DeployEvent),
   Mint(MintEvent),
-  InscribeTransfer(InscripbeTransferEvent),
+  InscribeTransfer(InscribeTransferEvent),
   Transfer(TransferEvent),
 }
 
@@ -35,6 +36,7 @@ pub struct DeployEvent {
   pub limit_per_mint: u128,
   pub decimal: u8,
   pub tick: Tick,
+  pub self_mint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -45,7 +47,7 @@ pub struct MintEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct InscripbeTransferEvent {
+pub struct InscribeTransferEvent {
   pub tick: Tick,
   pub amount: u128,
 }
