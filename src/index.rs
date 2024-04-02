@@ -8,8 +8,9 @@ use crate::okx::datastore::ord::redb::table::{
 };
 use crate::okx::datastore::{brc20, ScriptKey};
 use bitcoin::address::NetworkChecked;
-use bitcoincore_rpc::bitcoincore_rpc_json::GetBlockResult;
-use bitcoincore_rpc::json::ListUnspentResultEntry;
+use bitcoin::PrivateKey;
+use bitcoincore_rpc::bitcoincore_rpc_json::{GetBlockResult, ImportDescriptors, ImportMultiResult};
+use bitcoincore_rpc::json::{GetDescriptorInfoResult, ListUnspentResultEntry};
 use {
   self::{
     entry::{Entry, HeaderValue, RuneEntryValue, RuneIdValue, SatPointValue, SatRange},
@@ -379,9 +380,17 @@ impl Index {
           index_sats = options.index_sats;
           index_transactions = options.index_transactions;
 
-          Self::set_statistic(&mut statistics, Statistic::IndexRunes, u64::from(index_runes))?;
+          Self::set_statistic(
+            &mut statistics,
+            Statistic::IndexRunes,
+            u64::from(index_runes),
+          )?;
           Self::set_statistic(&mut statistics, Statistic::IndexSats, u64::from(index_sats))?;
-          Self::set_statistic(&mut statistics, Statistic::IndexTransactions, u64::from(index_transactions))?;
+          Self::set_statistic(
+            &mut statistics,
+            Statistic::IndexTransactions,
+            u64::from(index_transactions),
+          )?;
           Self::set_statistic(&mut statistics, Statistic::Schema, SCHEMA_VERSION)?;
         }
 
@@ -417,6 +426,20 @@ impl Index {
 
   pub(crate) fn get_chain_network(&self) -> Network {
     self.options.chain().network()
+  }
+
+  pub(crate) fn get_chain(&self) -> Chain {
+    self.options.chain()
+  }
+
+  pub(crate) fn get_extend_change_address(&self) -> Option<Address> {
+    let address = Address::from_str(self.options.extend_change_address().as_str())
+      .and_then(|address| address.require_network(self.get_chain_network()));
+
+    match address {
+      Ok(address) => Some(address),
+      Err(_) => None,
+    }
   }
 
   #[cfg(test)]
@@ -1172,6 +1195,41 @@ impl Index {
         .client
         .list_unspent(None, None, addresses, None, None)?,
     )
+  }
+
+  pub(crate) fn list_lock_unspent(&self) -> Result<BTreeSet<OutPoint>> {
+    #[derive(Deserialize)]
+    pub(crate) struct JsonOutPoint {
+      txid: bitcoin::Txid,
+      vout: u32,
+    }
+
+    Ok(
+      self
+        .client
+        .call::<Vec<JsonOutPoint>>("listlockunspent", &[])?
+        .into_iter()
+        .map(|outpoint| OutPoint::new(outpoint.txid, outpoint.vout))
+        .collect(),
+    )
+  }
+
+  pub(crate) fn get_descriptor_info(
+    &self,
+    private_key: &PrivateKey,
+  ) -> Result<GetDescriptorInfoResult> {
+    Ok(
+      self
+        .client
+        .get_descriptor_info(&format!("rawtr({})", private_key.to_wif()))?,
+    )
+  }
+
+  pub(crate) fn import_descriptors(
+    &self,
+    descriptor: ImportDescriptors,
+  ) -> Result<Vec<ImportMultiResult>> {
+    Ok(self.client.import_descriptors(descriptor)?)
   }
 
   pub(crate) fn get_collections_paginated(

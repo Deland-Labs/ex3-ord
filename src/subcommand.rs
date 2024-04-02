@@ -82,6 +82,8 @@ pub struct Empty {}
 
 pub(crate) trait Output: Send {
   fn print_json(&self);
+
+  fn to_json(&self) -> String;
 }
 
 impl<T> Output for T
@@ -91,6 +93,10 @@ where
   fn print_json(&self) {
     serde_json::to_writer_pretty(io::stdout(), self).ok();
     println!();
+  }
+
+  fn to_json(&self) -> String {
+    serde_json::to_string(self).unwrap()
   }
 }
 

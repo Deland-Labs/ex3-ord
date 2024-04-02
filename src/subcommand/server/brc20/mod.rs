@@ -1,5 +1,6 @@
 use super::{types::ScriptPubkey, *};
 mod balance;
+mod inscribe_brc20_transferable;
 mod receipt;
 mod ticker;
 mod transferable;
@@ -18,4 +19,6 @@ pub(super) enum BRC20Error {
   BlockNotFound,
 }
 
-pub(super) use {balance::*, receipt::*, ticker::*, transferable::*};
+pub(super) use {
+  balance::*, inscribe_brc20_transferable::*, receipt::*, ticker::*, transferable::*,
+};
