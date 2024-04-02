@@ -328,6 +328,7 @@ impl InscribeBrc20Transferable {
         .commit_fee_rate
         .unwrap_or(FeeRate::try_from(1.0).unwrap()),
       mode: Default::default(),
+      no_backup: self.no_backup,
     }
     .inscribe(index)
   }
@@ -340,4 +341,31 @@ fn calculate_fee(tx: &Transaction, utxos: &BTreeMap<OutPoint, Amount>) -> u64 {
     .sum::<u64>()
     .checked_sub(tx.output.iter().map(|txout| txout.value).sum::<u64>())
     .unwrap()
+}
+
+fn backup_recovery_key(
+  index: &Index,
+  recovery_key_pair: TweakedKeyPair,
+  network: Network,
+) -> Result {
+  let recovery_private_key = PrivateKey::new(recovery_key_pair.to_inner().secret_key(), network);
+  let info = index.get_descriptor_info(&recovery_private_key)?;
+
+  let response = index.import_descriptors(ImportDescriptors {
+    descriptor: format!("rawtr({})#{}", recovery_private_key.to_wif(), info.checksum),
+    timestamp: Timestamp::Now,
+    active: Some(false),
+    range: None,
+    next_index: None,
+    internal: Some(false),
+    label: Some("commit tx recovery key".to_string()),
+  })?;
+
+  for result in response {
+    if !result.success {
+      return Err(anyhow!("commit tx recovery key import failed"));
+    }
+  }
+
+  Ok(())
 }

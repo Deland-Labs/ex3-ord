@@ -5,6 +5,8 @@ pub(super) struct Brc20Transferable {
   pub(super) inscription: Inscription,
   pub(super) commit_fee_rate: FeeRate,
   pub(super) mode: Mode,
+  /// Do not back up recovery key
+  pub(super) no_backup: bool,
 }
 
 impl Brc20Transferable {
@@ -30,9 +32,14 @@ impl Brc20Transferable {
 
     let wallet_inscriptions = index.get_inscriptions(&utxos)?;
 
-    let commit_tx_change = [self.destination.clone(), self.destination.clone()];
+    // first index use extend change address
+    let extend_change_address = index
+      .get_extend_change_address()
+      .expect("no extend change address exit in options");
 
-    let (unsigned_commit_tx, reveal_tx, _recovery_key_pair, total_fees) = self
+    let commit_tx_change = [extend_change_address, self.destination.clone()];
+
+    let (unsigned_commit_tx, reveal_tx, recovery_key_pair, total_fees) = self
       .create_batch_inscription_transactions(
         wallet_inscriptions,
         index.get_chain(),
@@ -41,6 +48,11 @@ impl Brc20Transferable {
         utxos.clone(),
         commit_tx_change,
       )?;
+
+    let network = index.get_chain_network();
+    if !self.no_backup {
+      backup_recovery_key(index.as_ref(), recovery_key_pair, network)?;
+    }
 
     Ok(Box::new(self.output_for_outside_sign(
       unsigned_commit_tx,

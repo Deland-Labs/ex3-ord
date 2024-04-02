@@ -97,6 +97,13 @@ pub struct Options {
     help = "(experimental) DB commit persist interval."
   )]
   pub(crate) commit_persist_interval: u64,
+
+  #[clap(
+    long,
+    default_value = "",
+    help = "Extend change address for brc 20 transfer inscription."
+  )]
+  pub(crate) extend_change_address: String,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +345,10 @@ impl Options {
     } else {
       self.commit_persist_interval
     }
+  }
+
+  pub(crate) fn extend_change_address(&self) -> String {
+    self.extend_change_address.clone()
   }
 }
 
